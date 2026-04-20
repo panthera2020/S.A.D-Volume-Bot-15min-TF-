@@ -1,0 +1,7 @@
+pybit
+pandas
+numpy
+fastapi
+uvicorn[standard]
+jinja2
+python-dotenv

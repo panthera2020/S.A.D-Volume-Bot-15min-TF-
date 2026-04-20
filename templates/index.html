@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bybit Donchian Volume Bot</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background: #111; color: #eee; }
+    h1, h2 { margin: 8px 0; }
+    .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 16px; }
+    .card { background: #1e1e1e; border: 1px solid #333; padding: 10px; border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+    th, td { border: 1px solid #333; padding: 6px; font-size: 12px; }
+    th { background: #222; }
+    .small { font-size: 12px; color: #bbb; }
+    .banner { display: none; margin: 10px 0; padding: 10px; border-radius: 6px; border: 1px solid; font-size: 13px; }
+    .banner.error { background: #3a1313; border-color: #a33; color: #ffd7d7; }
+    .banner.warn { background: #3a2a13; border-color: #a76b1a; color: #ffe7c2; }
+  </style>
+</head>
+<body>
+  <h1>Perp Volume Bot Dashboard</h1>
+  <p class="small">Symbols: SOLUSDT, AVAXUSDT, DOGEUSDT | Timeframe: 15m | Strategy: Donchian + RSI + Volume</p>
+  <div style="margin-bottom: 12px;">
+    <button id="startBtn">Start Bot (runs 1s test trade)</button>
+    <button id="stopBtn">Stop Bot</button>
+    <span id="botStatus" class="small" style="margin-left: 10px;">Bot Status: Unknown</span>
+    <span id="connStatus" class="small" style="margin-left: 10px;">Exchange: Unknown</span>
+  </div>
+  <div id="authBanner" class="banner error"></div>
+  <div id="netBanner" class="banner warn"></div>
+
+  <div class="grid" id="stats"></div>
+
+  <h2>Current Positions</h2>
+  <table id="positions">
+    <thead>
+      <tr><th>Symbol</th><th>Side</th><th>Size</th><th>Avg Price</th><th>Mark Price</th><th>Unrealised PnL</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Recent Orders / Trades</h2>
+  <table id="orders">
+    <thead>
+      <tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>SL</th><th>TP</th><th>Expected Risk</th><th>Notional</th><th>Status</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Bot Logs</h2>
+  <table id="logs">
+    <thead>
+      <tr><th>Time</th><th>Level</th><th>Message</th><th>Payload</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    let lastSeenOrderId = null;
+    let clearedLogsThisRefresh = false;
+
+    function formatNum(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(4) : v;
+    }
+    function card(k, v) {
+      return `<div class="card"><div class="small">${k}</div><div>${v}</div></div>`;
+    }
+
+    function playTradeSound() {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.value = 0.06;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.20);
+    }
+
+    async function startBot() {
+      await fetch('/api/bot/start', { method: 'POST' });
+      await load();
+    }
+
+    async function stopBot() {
+      await fetch('/api/bot/stop', { method: 'POST' });
+      await load();
+    }
+
+    async function load() {
+      if (!clearedLogsThisRefresh) {
+        try {
+          await fetch('/api/logs/clear', { method: 'POST' });
+        } catch (e) {
+          // Ignore; dashboard will still load even if clear fails.
+        }
+        clearedLogsThisRefresh = true;
+      }
+      const res = await fetch('/api/summary');
+      const data = await res.json();
+      const orders = data.orders || [];
+
+      const s = data.stats || {};
+      document.getElementById('stats').innerHTML = [
+        card('Total Orders', s.total_orders ?? 0),
+        card('Total Notional (USD)', formatNum(s.total_notional_usd ?? 0)),
+        card('Total Expected Risk (USD)', formatNum(s.total_expected_risk_usd ?? 0)),
+        card('Open Positions', s.open_positions ?? 0),
+        card('Unrealised PnL (USD)', formatNum(s.current_unrealised_pnl ?? 0)),
+      ].join('');
+      document.getElementById('botStatus').textContent = `Bot Status: ${data.bot_running ? 'Running' : 'Stopped'}`;
+      const conn = data.connectivity || {};
+      document.getElementById('connStatus').textContent = `Exchange: ${conn.ok ? 'Connected' : 'Disconnected'}${conn.message ? ' - ' + conn.message : ''}`;
+      const authBanner = document.getElementById('authBanner');
+      const netBanner = document.getElementById('netBanner');
+      authBanner.style.display = 'none';
+      netBanner.style.display = 'none';
+      if (!conn.ok && conn.error_type === 'auth_invalid_401') {
+        authBanner.textContent = `Auth invalid (401). ${conn.hint || ''}`;
+        authBanner.style.display = 'block';
+      } else if (!conn.ok) {
+        netBanner.textContent = `${conn.error_type || 'connection_error'}: ${conn.hint || conn.message || 'Exchange connection issue.'}`;
+        netBanner.style.display = 'block';
+      }
+
+      const posBody = document.querySelector('#positions tbody');
+      posBody.innerHTML = (data.positions || []).map(p => `
+        <tr>
+          <td>${p.symbol}</td>
+          <td>${p.side || '-'}</td>
+          <td>${formatNum(p.size)}</td>
+          <td>${formatNum(p.avg_price)}</td>
+          <td>${formatNum(p.mark_price)}</td>
+          <td>${formatNum(p.unrealised_pnl)}</td>
+        </tr>
+      `).join('');
+
+      const orderBody = document.querySelector('#orders tbody');
+      orderBody.innerHTML = orders.map(o => `
+        <tr>
+          <td>${o.ts}</td>
+          <td>${o.symbol}</td>
+          <td>${o.side}</td>
+          <td>${formatNum(o.qty)}</td>
+          <td>${formatNum(o.entry_price)}</td>
+          <td>${formatNum(o.stop_loss)}</td>
+          <td>${formatNum(o.take_profit)}</td>
+          <td>${formatNum(o.expected_risk)}</td>
+          <td>${formatNum(o.notional)}</td>
+          <td>${o.status}</td>
+        </tr>
+      `).join('');
+
+      if (orders.length > 0) {
+        const latest = Number(orders[0].id);
+        if (lastSeenOrderId === null) {
+          lastSeenOrderId = latest;
+        } else if (latest > lastSeenOrderId) {
+          playTradeSound();
+          lastSeenOrderId = latest;
+        }
+      }
+
+      const logBody = document.querySelector('#logs tbody');
+      logBody.innerHTML = (data.logs || []).map(l => `
+        <tr>
+          <td>${l.ts}</td>
+          <td>${l.level}</td>
+          <td>${l.message}</td>
+          <td><code>${l.payload || '{}'}</code></td>
+        </tr>
+      `).join('');
+    }
+    document.getElementById('startBtn').addEventListener('click', startBot);
+    document.getElementById('stopBtn').addEventListener('click', stopBot);
+    load();
+    setInterval(load, 5000);
+  </script>
+</body>
+</html>
