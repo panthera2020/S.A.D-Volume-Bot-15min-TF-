@@ -100,11 +100,10 @@ class BotEngine:
             self.db.log("INFO", "Skipped signal due to existing open position", {"symbol": symbol})
             return
 
-        # Enforce hard risk cap from user request.
         if signal.expected_risk_usd > self.cfg.risk_usd_per_trade:
             self.db.log(
                 "INFO",
-                "Skipped signal due to risk > $5 at fixed $3000 notional",
+                "Skipped signal: risk exceeds cap",
                 {
                     "symbol": symbol,
                     "expected_risk_usd": signal.expected_risk_usd,
@@ -113,13 +112,22 @@ class BotEngine:
             )
             return
 
-        order_id = self.client.place_entry_with_tpsl(
-            symbol=symbol,
-            side=signal.side,
-            qty=signal.qty,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
-        )
+        try:
+            order_id = self.client.place_entry_with_tpsl(
+                symbol=symbol,
+                side=signal.side,
+                qty=signal.qty,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+            )
+        except RuntimeError as exc:
+            error_msg = str(exc)
+            if "did not fill" in error_msg:
+                self.db.log("INFO", "Order not filled (IOC cancelled by exchange)", {"symbol": symbol})
+            else:
+                self.db.log("ERROR", "Entry aborted: TP/SL attachment failed", {"symbol": symbol, "error": error_msg})
+            return
+
         self.trade_count += 1
         self.db.add_order(
             symbol=symbol,
@@ -143,7 +151,6 @@ class BotEngine:
                 "entry_price": signal.entry_price,
                 "stop_loss": signal.stop_loss,
                 "take_profit": signal.take_profit,
-                "expected_risk_usd": signal.expected_risk_usd,
                 "order_id": order_id,
             },
         )
@@ -152,7 +159,7 @@ class BotEngine:
         symbol = self.cfg.symbols[0]
         try:
             if self.client.has_open_position(symbol):
-                self.db.log("INFO", "Test trade skipped due to existing open position", {"symbol": symbol})
+                self.db.log("INFO", "Test trade skipped: open position exists", {"symbol": symbol})
                 return
 
             df = self.client.candles(symbol, limit=2)
@@ -162,12 +169,10 @@ class BotEngine:
                 self.db.log("WARN", "Test trade aborted: normalized qty is zero", {"symbol": symbol})
                 return
 
-            open_side = "Buy"
-            close_side = "Sell"
-            open_order_id = self.client.place_market_order(symbol=symbol, side=open_side, qty=qty)
+            open_order_id = self.client.place_market_order(symbol=symbol, side="Buy", qty=qty)
             self.db.add_order(
                 symbol=symbol,
-                side=open_side,
+                side="Buy",
                 qty=qty,
                 entry_price=price,
                 stop_loss=0.0,
@@ -182,11 +187,11 @@ class BotEngine:
             time.sleep(1.0)
 
             close_order_id = self.client.place_market_order(
-                symbol=symbol, side=close_side, qty=qty, reduce_only=True
+                symbol=symbol, side="Sell", qty=qty, reduce_only=True
             )
             self.db.add_order(
                 symbol=symbol,
-                side=close_side,
+                side="Sell",
                 qty=qty,
                 entry_price=price,
                 stop_loss=0.0,
@@ -196,6 +201,7 @@ class BotEngine:
                 expected_risk=0.0,
                 notional=self.cfg.fixed_notional_usd,
             )
-            self.db.log("INFO", "Test trade closed after 1s", {"symbol": symbol, "qty": qty, "order_id": close_order_id})
+            self.db.log("INFO", "Test trade closed", {"symbol": symbol, "qty": qty, "order_id": close_order_id})
+
         except Exception as exc:
             self.db.log("ERROR", "Test trade failed", {"symbol": symbol, "error": str(exc)})
