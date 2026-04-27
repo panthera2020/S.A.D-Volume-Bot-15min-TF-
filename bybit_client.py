@@ -15,16 +15,16 @@ class BybitClient:
             self.session = HTTP(
                 api_key=cfg.api_key,
                 api_secret=cfg.api_secret,
-                testnet=cfg.testnet,
-                demo=cfg.demo,
+                testnet=False,
+                demo=True,
                 timeout=cfg.bybit_http_timeout,
             )
         except TypeError:
             self.session = HTTP(
                 api_key=cfg.api_key,
                 api_secret=cfg.api_secret,
-                testnet=cfg.testnet,
-                demo=cfg.demo,
+                testnet=False,
+                demo=True,
             )
         # Cache: symbol -> (qty_step, min_qty)
         self._instrument_cache: dict[str, tuple[float, float]] = {}
@@ -75,8 +75,14 @@ class BybitClient:
         )
         rows = resp["result"]["list"]
         data = [
-            {"start_time": int(r[0]), "open": float(r[1]), "high": float(r[2]),
-             "low": float(r[3]), "close": float(r[4]), "volume": float(r[5])}
+            {
+                "start_time": int(r[0]),
+                "open": float(r[1]),
+                "high": float(r[2]),
+                "low": float(r[3]),
+                "close": float(r[4]),
+                "volume": float(r[5]),
+            }
             for r in rows
         ]
         return pd.DataFrame(data).sort_values("start_time").reset_index(drop=True)
@@ -107,13 +113,17 @@ class BybitClient:
 
     def has_open_position(self, symbol: str) -> bool:
         resp = self._request_with_retry(
-            self.session.get_positions, category=self.cfg.category, symbol=symbol
+            self.session.get_positions,
+            category=self.cfg.category,
+            symbol=symbol,
         )
         return any(abs(float(p["size"])) > 0 for p in resp["result"]["list"])
 
     def position_snapshot(self, symbol: str) -> dict:
         resp = self._request_with_retry(
-            self.session.get_positions, category=self.cfg.category, symbol=symbol
+            self.session.get_positions,
+            category=self.cfg.category,
+            symbol=symbol,
         )
         for p in resp["result"]["list"]:
             size = float(p["size"])
@@ -141,10 +151,8 @@ class BybitClient:
             if not orders:
                 return False
             status = orders[0].get("orderStatus", "")
-            # Filled or PartiallyFilled counts as a real trade on the exchange
             return status in ("Filled", "PartiallyFilled")
         except Exception:
-            # If we can't confirm, assume it didn't fill to avoid phantom records
             return False
 
     def place_entry_with_tpsl(
@@ -164,12 +172,12 @@ class BybitClient:
             orderType="Market",
             qty=str(qty),
             timeInForce="IOC",
-            positionIdx=0,  # one-way mode
+            positionIdx=0,
         )
         order_id = order["result"]["orderId"]
 
-        # Step 2: confirm the order actually filled before attaching TP/SL
-        time.sleep(0.5)  # brief pause for exchange to process
+        # Step 2: confirm fill before attaching TP/SL
+        time.sleep(0.5)
         if not self._confirm_fill(symbol, order_id):
             raise RuntimeError(
                 f"Order {order_id} did not fill (IOC cancelled by exchange). "
