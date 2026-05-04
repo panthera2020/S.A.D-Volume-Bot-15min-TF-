@@ -18,6 +18,7 @@ class BybitClient:
                 testnet=False,
                 demo=True,
                 timeout=cfg.bybit_http_timeout,
+                recv_window=20000,   # ← ADD THIS — 20s window, covers clock drift
             )
         except TypeError:
             self.session = HTTP(
@@ -25,6 +26,7 @@ class BybitClient:
                 api_secret=cfg.api_secret,
                 testnet=False,
                 demo=True,
+                recv_window=20000,   # ← ADD THIS here too
             )
 
         self._instrument_cache: dict[str, tuple[float, float]] = {}

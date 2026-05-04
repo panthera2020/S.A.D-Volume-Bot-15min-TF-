@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)   # ← THIS IS THE FIX — forces .env to win over system env vars
 
 
 @dataclass

@@ -20,7 +20,7 @@ def build_web_app(db: BotDatabase, engine: BotEngine) -> FastAPI:
             {
                 "stats": db.stats(),
                 "positions": db.latest_positions(),
-                "orders": db.recent_orders(100),
+                "orders": db.recent_orders(15),
                 "logs": db.recent_logs(200),
                 "bot_running": engine.is_running(),
                 "connectivity": engine.connectivity_status(),
