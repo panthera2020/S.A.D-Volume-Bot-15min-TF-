@@ -26,7 +26,7 @@ class BybitClient:
                 testnet=False,
                 demo=True,
             )
-        # Cache: symbol -> (qty_step, min_qty)
+
         self._instrument_cache: dict[str, tuple[float, float]] = {}
 
     def _request_with_retry(self, fn: Callable[..., Any], **kwargs: Any) -> Any:
@@ -59,11 +59,23 @@ class BybitClient:
     def connectivity_check(self) -> dict:
         try:
             resp = self._request_with_retry(self.session.get_server_time)
-            return {"ok": True, "message": "Connected", "server_time": resp.get("time", ""), "error_type": "", "hint": ""}
+            return {
+                "ok": True,
+                "message": "Connected",
+                "server_time": resp.get("time", ""),
+                "error_type": "",
+                "hint": "",
+            }
         except Exception as exc:
             message = str(exc)
             error_type, hint = self._classify_error(message)
-            return {"ok": False, "message": message, "server_time": "", "error_type": error_type, "hint": hint}
+            return {
+                "ok": False,
+                "message": message,
+                "server_time": "",
+                "error_type": error_type,
+                "hint": hint,
+            }
 
     def candles(self, symbol: str, limit: int = 300) -> pd.DataFrame:
         resp = self._request_with_retry(
@@ -88,7 +100,6 @@ class BybitClient:
         return pd.DataFrame(data).sort_values("start_time").reset_index(drop=True)
 
     def _get_instrument_info(self, symbol: str) -> tuple[float, float]:
-        """Returns (qty_step, min_qty). Cached."""
         if symbol in self._instrument_cache:
             return self._instrument_cache[symbol]
         resp = self._request_with_retry(
@@ -106,7 +117,9 @@ class BybitClient:
         step, min_qty = self._get_instrument_info(symbol)
         step_dec = Decimal(str(step))
         q = Decimal(str(qty))
-        normalized = float((q / step_dec).quantize(Decimal("1"), rounding=ROUND_DOWN) * step_dec)
+        normalized = float(
+            (q / step_dec).quantize(Decimal("1"), rounding=ROUND_DOWN) * step_dec
+        )
         if normalized < min_qty:
             return 0.0
         return normalized
@@ -136,24 +149,36 @@ class BybitClient:
                     "mark_price": float(p["markPrice"] or 0),
                     "unrealised_pnl": float(p["unrealisedPnl"] or 0),
                 }
-        return {"symbol": symbol, "side": "", "size": 0.0, "avg_price": 0.0, "mark_price": 0.0, "unrealised_pnl": 0.0}
+        return {
+            "symbol": symbol,
+            "side": "",
+            "size": 0.0,
+            "avg_price": 0.0,
+            "mark_price": 0.0,
+            "unrealised_pnl": 0.0,
+        }
 
     def _confirm_fill(self, symbol: str, order_id: str) -> bool:
-        """Returns True if the order actually filled (fully or partially)."""
-        try:
-            resp = self._request_with_retry(
-                self.session.get_order_history,
-                category=self.cfg.category,
-                symbol=symbol,
-                orderId=order_id,
-            )
-            orders = resp["result"]["list"]
-            if not orders:
-                return False
-            status = orders[0].get("orderStatus", "")
-            return status in ("Filled", "PartiallyFilled")
-        except Exception:
-            return False
+        """Retries up to 5 times with 1s gap — handles Bybit order history API lag."""
+        for _ in range(5):
+            try:
+                resp = self._request_with_retry(
+                    self.session.get_order_history,
+                    category=self.cfg.category,
+                    symbol=symbol,
+                    orderId=order_id,
+                )
+                orders = resp["result"]["list"]
+                if orders:
+                    status = orders[0].get("orderStatus", "")
+                    if status in ("Filled", "PartiallyFilled"):
+                        return True
+                    if status in ("Cancelled", "Rejected", "Deactivated"):
+                        return False
+            except Exception:
+                pass
+            time.sleep(1.0)
+        return False
 
     def place_entry_with_tpsl(
         self,
@@ -163,7 +188,6 @@ class BybitClient:
         stop_loss: float,
         take_profit: float,
     ) -> str:
-        # Step 1: place market entry
         order = self._request_with_retry(
             self.session.place_order,
             category=self.cfg.category,
@@ -171,20 +195,18 @@ class BybitClient:
             side=side,
             orderType="Market",
             qty=str(qty),
-            timeInForce="IOC",
+            timeInForce="GTC",
             positionIdx=0,
         )
         order_id = order["result"]["orderId"]
 
-        # Step 2: confirm fill before attaching TP/SL
         time.sleep(0.5)
         if not self._confirm_fill(symbol, order_id):
             raise RuntimeError(
-                f"Order {order_id} did not fill (IOC cancelled by exchange). "
+                f"Order {order_id} did not fill. "
                 f"No position opened — TP/SL not set."
             )
 
-        # Step 3: attach TP/SL — if this fails, emergency close
         try:
             self._request_with_retry(
                 self.session.set_trading_stop,
@@ -198,7 +220,9 @@ class BybitClient:
         except Exception as tpsl_exc:
             close_side = "Sell" if side == "Buy" else "Buy"
             try:
-                self.place_market_order(symbol=symbol, side=close_side, qty=qty, reduce_only=True)
+                self.place_market_order(
+                    symbol=symbol, side=close_side, qty=qty, reduce_only=True
+                )
             except Exception:
                 pass
             raise RuntimeError(
@@ -207,7 +231,9 @@ class BybitClient:
 
         return order_id
 
-    def place_market_order(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> str:
+    def place_market_order(
+        self, symbol: str, side: str, qty: float, reduce_only: bool = False
+    ) -> str:
         order = self._request_with_retry(
             self.session.place_order,
             category=self.cfg.category,
@@ -215,7 +241,7 @@ class BybitClient:
             side=side,
             orderType="Market",
             qty=str(qty),
-            timeInForce="IOC",
+            timeInForce="GTC",
             reduceOnly=reduce_only,
             positionIdx=0,
         )

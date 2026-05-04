@@ -57,7 +57,11 @@ class BotEngine:
                     try:
                         self.process_symbol(symbol)
                     except Exception as exc:
-                        self.db.log("ERROR", "Symbol processing failed", {"symbol": symbol, "error": str(exc)})
+                        self.db.log(
+                            "ERROR",
+                            "Symbol processing failed",
+                            {"symbol": symbol, "error": str(exc)},
+                        )
             except Exception as exc:
                 self.db.log("ERROR", "Loop error", {"error": str(exc)})
             time.sleep(self.cfg.loop_seconds)
@@ -75,20 +79,27 @@ class BotEngine:
 
         df = self.client.candles(symbol)
         bar_time = int(df.iloc[-1]["start_time"])
+
         if self.last_bar_time.get(symbol) == bar_time:
             return
         self.last_bar_time[symbol] = bar_time
 
         if self.trade_count >= self.cfg.max_trades_per_session:
-            self.db.log("INFO", f"Trade cap reached for day ({self.cfg.max_trades_per_session})")
+            self.db.log(
+                "INFO",
+                f"Trade cap reached for day ({self.cfg.max_trades_per_session})",
+            )
             return
 
         df = enrich_indicators(df, self.cfg)
         price = float(df.iloc[-1]["close"])
         raw_qty = self.cfg.fixed_notional_usd / price
         qty = self.client.normalize_qty(symbol, raw_qty)
+
         if qty <= 0:
-            self.db.log("WARN", "Normalized qty is zero", {"symbol": symbol, "raw_qty": raw_qty})
+            self.db.log(
+                "WARN", "Normalized qty is zero", {"symbol": symbol, "raw_qty": raw_qty}
+            )
             return
 
         signal = build_signal(symbol, df, self.cfg, qty)
@@ -97,7 +108,9 @@ class BotEngine:
             return
 
         if self.client.has_open_position(symbol):
-            self.db.log("INFO", "Skipped signal due to existing open position", {"symbol": symbol})
+            self.db.log(
+                "INFO", "Skipped signal due to existing open position", {"symbol": symbol}
+            )
             return
 
         if signal.expected_risk_usd > self.cfg.risk_usd_per_trade:
@@ -123,9 +136,17 @@ class BotEngine:
         except RuntimeError as exc:
             error_msg = str(exc)
             if "did not fill" in error_msg:
-                self.db.log("INFO", "Order not filled (IOC cancelled by exchange)", {"symbol": symbol})
+                self.db.log(
+                    "INFO",
+                    "Order not filled (cancelled by exchange)",
+                    {"symbol": symbol},
+                )
             else:
-                self.db.log("ERROR", "Entry aborted: TP/SL attachment failed", {"symbol": symbol, "error": error_msg})
+                self.db.log(
+                    "ERROR",
+                    "Entry aborted: TP/SL attachment failed",
+                    {"symbol": symbol, "error": error_msg},
+                )
             return
 
         self.trade_count += 1
@@ -159,17 +180,46 @@ class BotEngine:
         symbol = self.cfg.symbols[0]
         try:
             if self.client.has_open_position(symbol):
-                self.db.log("INFO", "Test trade skipped: open position exists", {"symbol": symbol})
+                self.db.log(
+                    "INFO",
+                    "Test trade skipped: open position exists",
+                    {"symbol": symbol},
+                )
                 return
 
             df = self.client.candles(symbol, limit=2)
             price = float(df.iloc[-1]["close"])
-            qty = self.client.normalize_qty(symbol, self.cfg.fixed_notional_usd / price)
+            qty = self.client.normalize_qty(
+                symbol, self.cfg.fixed_notional_usd / price
+            )
+
             if qty <= 0:
-                self.db.log("WARN", "Test trade aborted: normalized qty is zero", {"symbol": symbol})
+                self.db.log(
+                    "WARN",
+                    "Test trade aborted: normalized qty is zero",
+                    {"symbol": symbol},
+                )
                 return
 
-            open_order_id = self.client.place_market_order(symbol=symbol, side="Buy", qty=qty)
+            # Open
+            open_order_id = self.client.place_market_order(
+                symbol=symbol, side="Buy", qty=qty
+            )
+
+            time.sleep(0.5)
+            if not self.client._confirm_fill(symbol, open_order_id):
+                self.db.log(
+                    "ERROR",
+                    "Test trade open did NOT fill on Bybit — check demo account margin or reduce fixed_notional_usd",
+                    {
+                        "symbol": symbol,
+                        "order_id": open_order_id,
+                        "qty": qty,
+                        "price": price,
+                    },
+                )
+                return
+
             self.db.add_order(
                 symbol=symbol,
                 side="Buy",
@@ -182,13 +232,28 @@ class BotEngine:
                 expected_risk=0.0,
                 notional=self.cfg.fixed_notional_usd,
             )
-            self.db.log("INFO", "Test trade opened", {"symbol": symbol, "qty": qty, "order_id": open_order_id})
+            self.db.log(
+                "INFO",
+                "Test trade opened and confirmed on Bybit",
+                {"symbol": symbol, "qty": qty, "order_id": open_order_id},
+            )
 
             time.sleep(1.0)
 
+            # Close
             close_order_id = self.client.place_market_order(
                 symbol=symbol, side="Sell", qty=qty, reduce_only=True
             )
+
+            time.sleep(0.5)
+            if not self.client._confirm_fill(symbol, close_order_id):
+                self.db.log(
+                    "WARN",
+                    "Test trade close did NOT fill — position may still be open, close manually on Bybit",
+                    {"symbol": symbol, "order_id": close_order_id},
+                )
+                return
+
             self.db.add_order(
                 symbol=symbol,
                 side="Sell",
@@ -201,7 +266,13 @@ class BotEngine:
                 expected_risk=0.0,
                 notional=self.cfg.fixed_notional_usd,
             )
-            self.db.log("INFO", "Test trade closed", {"symbol": symbol, "qty": qty, "order_id": close_order_id})
+            self.db.log(
+                "INFO",
+                "Test trade closed and confirmed on Bybit",
+                {"symbol": symbol, "qty": qty, "order_id": close_order_id},
+            )
 
         except Exception as exc:
-            self.db.log("ERROR", "Test trade failed", {"symbol": symbol, "error": str(exc)})
+            self.db.log(
+                "ERROR", "Test trade failed", {"symbol": symbol, "error": str(exc)}
+            )
